@@ -10,6 +10,7 @@
 #pragma once
 
 #include "sstables/shared_sstable.hh"
+#include "sstables/generation_type.hh"
 #include "compaction/compaction_descriptor.hh"
 #include "gc_clock.hh"
 #include "utils/UUID.hh"
@@ -19,6 +20,8 @@
 using namespace compaction;
 
 namespace sstables {
+
+struct basic_info;
 
 bool is_eligible_for_compaction(const sstables::shared_sstable& sst) noexcept;
 
@@ -94,6 +97,10 @@ struct compaction_stats {
 };
 
 struct compaction_result {
+    shard_id shard_id;
+    compaction_type type;
+    std::vector<sstables::basic_info> sstables_in;
+    std::vector<sstables::basic_info> sstables_out;
     std::vector<sstables::shared_sstable> new_sstables;
     compaction_stats stats;
 };
