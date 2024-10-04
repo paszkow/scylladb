@@ -10,6 +10,7 @@
 #pragma once
 
 #include "sstables/shared_sstable.hh"
+#include "sstables/generation_type.hh"
 #include "compaction/compaction_descriptor.hh"
 #include "gc_clock.hh"
 #include "utils/UUID.hh"
@@ -93,7 +94,17 @@ struct compaction_stats {
     }
 };
 
+struct compaction_sstable_info {
+    sstring origin;
+    sstables::generation_type generation;
+    int64_t size;
+};
+
 struct compaction_result {
+    shard_id shard_id;
+    compaction_type type;
+    std::vector<compaction_sstable_info> sstables_in;
+    std::vector<compaction_sstable_info> sstables_out;
     std::vector<sstables::shared_sstable> new_sstables;
     compaction_stats stats;
 };

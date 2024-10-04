@@ -892,7 +892,13 @@ private:
     }
 protected:
     virtual compaction_result finish(std::chrono::time_point<db_clock> started_at, std::chrono::time_point<db_clock> ended_at) {
+        static auto to_compaction_sstable_info = [] (auto sst) { return compaction_sstable_info{sst->get_origin(), sst->generation(), sst->bytes_on_disk()};};
+
         compaction_result ret {
+            .shard_id = this_shard_id(),
+            .type = _type,
+            .sstables_in = boost::copy_range<std::vector<compaction_sstable_info>>(_sstables | boost::adaptors::transformed(to_compaction_sstable_info)),
+            .sstables_out = boost::copy_range<std::vector<compaction_sstable_info>>(_all_new_sstables | boost::adaptors::transformed(to_compaction_sstable_info)),
             .new_sstables = std::move(_all_new_sstables),
             .stats {
                 .ended_at = ended_at,
