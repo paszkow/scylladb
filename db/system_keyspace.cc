@@ -604,6 +604,12 @@ schema_ptr system_keyspace::built_indexes() {
 }
 
 /*static*/ schema_ptr system_keyspace::compaction_history() {
+    // Unlike user tables -- whose version is generated from the schema content, including the timestamp the schema is created at -- system tables have
+    // a stable version, generated from the name of the table. This is to avoid nodes creating the internal table, all ending up with a different version.
+    // So when a system table is changed, its version will not change -- so other nodes will not notice that there is a newer one. Thus in order to trigger
+    // a version change manually the offset is needed.
+    static constexpr uint16_t schema_version_offset = 1;
+
     static thread_local auto compaction_history = [] {
         schema_builder builder(generate_legacy_id(NAME, COMPACTION_HISTORY), NAME, COMPACTION_HISTORY,
         // partition key
@@ -616,8 +622,15 @@ schema_ptr system_keyspace::built_indexes() {
             {"bytes_out", long_type},
             {"columnfamily_name", utf8_type},
             {"compacted_at", timestamp_type},
+            {"compaction_type", utf8_type},
             {"keyspace_name", utf8_type},
             {"rows_merged", map_type_impl::get_instance(int32_type, long_type, true)},
+            {"shard_id", short_type},
+            {"sstables_in", list_type_impl::get_instance(sstableinfo_type, true)->freeze()},
+            {"sstables_out", list_type_impl::get_instance(sstableinfo_type, true)->freeze()},
+            {"total_tombstone_purge_attempt", long_type},
+            {"total_tombstone_purge_failure_due_to_overlapping_with_memtable", long_type},
+            {"total_tombstone_purge_failure_due_to_overlapping_with_uncompacting_sstable", long_type},
         },
         // static columns
         {},
@@ -627,7 +640,7 @@ schema_ptr system_keyspace::built_indexes() {
         "week-long compaction history"
         );
         builder.set_default_time_to_live(std::chrono::duration_cast<std::chrono::seconds>(days(7)));
-        builder.with_version(generate_schema_version(builder.uuid()));
+        builder.with_version(generate_schema_version(builder.uuid(), schema_version_offset));
         return builder.build(schema_builder::compact_storage::no);
     }();
     return compaction_history;
