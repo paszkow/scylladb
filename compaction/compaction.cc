@@ -138,18 +138,18 @@ std::string_view to_string(compaction_type_options::scrub::quarantine_mode quara
     return "(invalid)";
 }
 
-static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_s, sstable_set::incremental_selector& selector,
+static max_purgeable get_max_purgeable_timestamp(const table_state& table_s, sstable_set::incremental_selector& selector,
         const std::unordered_set<shared_sstable>& compacting_set, const dht::decorated_key& dk, uint64_t& bloom_filter_checks,
         const api::timestamp_type compacting_max_timestamp, const bool gc_check_only_compacting_sstables, const is_shadowable is_shadowable) {
     if (!table_s.tombstone_gc_enabled()) [[unlikely]] {
-        return api::min_timestamp;
+        return { .timestamp = api::min_timestamp };
     }
 
     auto timestamp = api::max_timestamp;
     if (gc_check_only_compacting_sstables) {
         // If gc_check_only_compacting_sstables is enabled, do not
         // check memtables and other sstables not being compacted.
-        return timestamp;
+        return { .timestamp = timestamp };
     }
 
     api::timestamp_type memtable_min_timestamp;
@@ -222,7 +222,7 @@ static api::timestamp_type get_max_purgeable_timestamp(const table_state& table_
             timestamp = min_timestamp;
         }
     }
-    return timestamp;
+    return { .timestamp = timestamp };
 }
 
 static std::vector<shared_sstable> get_uncompacting_sstables(const table_state& table_s, std::vector<shared_sstable> sstables) {
