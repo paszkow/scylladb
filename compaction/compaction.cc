@@ -505,6 +505,7 @@ protected:
     uint64_t _estimated_partitions = 0;
     double _estimated_droppable_tombstone_ratio = 0;
     uint64_t _bloom_filter_checks = 0;
+    tombstone_purge_stats _tombstone_purge_stats;
     db::replay_position _rp;
     encoding_stats_collector _stats_collector;
     const bool _can_split_large_partition = false;
@@ -846,7 +847,8 @@ private:
             });
         });
         const auto& gc_state = get_tombstone_gc_state();
-        return consumer(make_compacting_reader(setup_sstable_reader(), compaction_time, max_purgeable_func(), gc_state));
+        return consumer(make_compacting_reader(setup_sstable_reader(), compaction_time, max_purgeable_func(), gc_state,
+                                               streamed_mutation::forwarding::no, &_tombstone_purge_stats));
     }
 
     future<> consume() {
@@ -868,7 +870,8 @@ private:
                         max_purgeable_func(),
                         get_tombstone_gc_state(),
                         get_compacted_fragments_writer(),
-                        get_gc_compacted_fragments_writer());
+                        get_gc_compacted_fragments_writer(),
+                        &_tombstone_purge_stats);
 
                     reader.consume_in_thread(std::move(cfc));
                     return;
@@ -878,7 +881,8 @@ private:
                     max_purgeable_func(),
                     get_tombstone_gc_state(),
                     get_compacted_fragments_writer(),
-                    noop_compacted_fragments_consumer());
+                    noop_compacted_fragments_consumer(),
+                    &_tombstone_purge_stats);
                 reader.consume_in_thread(std::move(cfc));
             });
         });
@@ -909,6 +913,7 @@ protected:
                 .start_size = _start_size,
                 .end_size = _end_size,
                 .bloom_filter_checks = _bloom_filter_checks,
+                .tombstone_purge_stats = std::move(_tombstone_purge_stats),
             },
         };
 

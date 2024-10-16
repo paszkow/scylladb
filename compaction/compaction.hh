@@ -12,6 +12,7 @@
 #include "sstables/shared_sstable.hh"
 #include "sstables/generation_type.hh"
 #include "compaction/compaction_descriptor.hh"
+#include "mutation/mutation_tombstone_stats.hh"
 #include "gc_clock.hh"
 #include "utils/UUID.hh"
 #include "table_state.hh"
@@ -80,6 +81,7 @@ struct compaction_stats {
     uint64_t validation_errors = 0;
     // Bloom filter checks during max purgeable calculation
     uint64_t bloom_filter_checks = 0;
+    tombstone_purge_stats tombstone_purge_stats;
 
     compaction_stats& operator+=(const compaction_stats& r) {
         ended_at = std::max(ended_at, r.ended_at);
@@ -87,6 +89,7 @@ struct compaction_stats {
         end_size += r.end_size;
         validation_errors += r.validation_errors;
         bloom_filter_checks += r.bloom_filter_checks;
+        tombstone_purge_stats += r.tombstone_purge_stats;
         return *this;
     }
     friend compaction_stats operator+(const compaction_stats& l, const compaction_stats& r) {
