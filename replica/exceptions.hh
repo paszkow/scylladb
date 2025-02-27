@@ -63,6 +63,15 @@ public:
     virtual const char* what() const noexcept override { return _message.c_str(); }
 };
 
+class user_table_writes_disabled_exception final: public replica_exception {
+public:
+    user_table_writes_disabled_exception() noexcept
+        : replica_exception()
+    { }
+
+    virtual const char* what() const noexcept override { return "user table writes disabled"; }
+};
+
 using abort_requested_exception = seastar::abort_requested_exception;
 
 struct exception_variant {

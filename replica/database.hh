@@ -1468,6 +1468,7 @@ private:
         uint64_t total_writes_failed = 0;
         uint64_t total_writes_timedout = 0;
         uint64_t total_writes_rate_limited = 0;
+        uint64_t total_writes_to_user_tables_rejected = 0;
         uint64_t total_reads = 0;
         uint64_t total_reads_failed = 0;
         uint64_t total_reads_rate_limited = 0;
@@ -1527,6 +1528,7 @@ private:
     compaction_manager& _compaction_manager;
     seastar::metrics::metric_groups _metrics;
     bool _enable_incremental_backups = false;
+    bool _disable_user_table_writes = false;
     bool _shutdown = false;
     bool _enable_autocompaction_toggle = false;
     query::querier_cache _querier_cache;
@@ -1606,6 +1608,7 @@ private:
     template<typename Future>
     Future update_write_metrics(Future&& f);
     void update_write_metrics_for_timed_out_write();
+    void update_write_metrics_for_rejected_user_table_writes();
     future<> create_keyspace(const lw_shared_ptr<keyspace_metadata>&, locator::effective_replication_map_factory& erm_factory, system_keyspace system);
     future<> remove(table&) noexcept;
     void drop_keyspace(const sstring& name);
@@ -1622,6 +1625,7 @@ public:
     }
 
     void set_enable_incremental_backups(bool val) { _enable_incremental_backups = val; }
+    void set_disable_user_table_writes(bool val) { _disable_user_table_writes = val; }
 
     void enable_autocompaction_toggle() noexcept { _enable_autocompaction_toggle = true; }
     friend class api::autocompaction_toggle_guard;

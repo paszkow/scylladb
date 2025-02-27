@@ -597,6 +597,8 @@ database::setup_metrics() {
         sm::make_counter("total_writes_rate_limited", _stats->total_writes_rate_limited,
                        sm::description("Counts write operations which were rejected on the replica side because the per-partition limit was reached.")),
 
+        sm::make_counter("total_writes_to_user_tables_rejected", _stats->total_writes_to_user_tables_rejected,
+                       sm::description("Counts write operations which were rejected due to disabled user tables writes.")),
 
         sm::make_counter("total_reads_rate_limited", _stats->total_reads_rate_limited,
                        sm::description("Counts read operations which were rejected on the replica side because the per-partition limit was reached.")),
@@ -1835,6 +1837,10 @@ future<mutation> database::apply_counter_update(schema_ptr s, const frozen_mutat
         update_write_metrics_for_timed_out_write();
         return make_exception_future<mutation>(timed_out_error{});
     }
+    if (_disable_user_table_writes && !is_system_table(*s)) {
+        update_write_metrics_for_rejected_user_table_writes();
+        return make_exception_future<mutation>(replica::user_table_writes_disabled_exception{});
+    }
   return update_write_metrics(seastar::futurize_invoke([&] {
     if (!s->is_synced()) {
         throw std::runtime_error(format("attempted to mutate using not synced schema of {}.{}, version={}",
@@ -2077,6 +2083,12 @@ void database::update_write_metrics_for_timed_out_write() {
     ++_stats->total_writes_timedout;
 }
 
+void database::update_write_metrics_for_rejected_user_table_writes() {
+    ++_stats->total_writes;
+    ++_stats->total_writes_failed;
+    ++_stats->total_writes_to_user_tables_rejected;
+}
+
 future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::commitlog::force_sync sync, db::timeout_clock::time_point timeout, db::per_partition_rate_limit::info rate_limit_info) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply {}", m.pretty_printer(s));
@@ -2084,6 +2096,10 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
     if (timeout <= db::timeout_clock::now()) {
         update_write_metrics_for_timed_out_write();
         return make_exception_future<>(timed_out_error{});
+    }
+    if (_disable_user_table_writes && !is_system_table(*s)) {
+        update_write_metrics_for_rejected_user_table_writes();
+        return make_exception_future<>(replica::user_table_writes_disabled_exception{});
     }
     if (!s->is_synced()) {
         on_internal_error(dblog, format("attempted to apply mutation using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
@@ -2094,6 +2110,10 @@ future<> database::apply(schema_ptr s, const frozen_mutation& m, tracing::trace_
 future<> database::apply_hint(schema_ptr s, const frozen_mutation& m, tracing::trace_state_ptr tr_state, db::timeout_clock::time_point timeout) {
     if (dblog.is_enabled(logging::log_level::trace)) {
         dblog.trace("apply hint {}", m.pretty_printer(s));
+    }
+    if (_disable_user_table_writes && !is_system_table(*s)) {
+        update_write_metrics_for_rejected_user_table_writes();
+        return make_exception_future<>(replica::user_table_writes_disabled_exception{});
     }
     if (!s->is_synced()) {
         on_internal_error(dblog, format("attempted to apply hint using not synced schema of {}.{}, version={}", s->ks_name(), s->cf_name(), s->version()));
