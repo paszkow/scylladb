@@ -886,10 +886,8 @@ future<> database::drop_keyspace_on_all_shards(sharded<database>& sharded_db, co
 }
 
 static bool is_system_table(const schema& s) {
-    auto& k = s.ks_name();
-    return k == db::system_keyspace::NAME ||
-        k == db::system_distributed_keyspace::NAME ||
-        k == db::system_distributed_keyspace::NAME_EVERYWHERE;
+    auto& ks = s.ks_name();
+    return ks.starts_with("system");
 }
 
 void database::init_schema_commitlog() {
