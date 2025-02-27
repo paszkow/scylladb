@@ -119,6 +119,7 @@
 #include "utils/shared_dict.hh"
 #include "message/dictionary_service.hh"
 #include "utils/disk_space_monitor.hh"
+#include "replica/write_throttling_controller.hh"
 
 
 #define P11_KIT_FUTURE_UNSTABLE_API
@@ -748,6 +749,7 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
     sharded<service::migration_notifier> mm_notifier;
     sharded<service::endpoint_lifecycle_notifier> lifecycle_notifier;
     std::optional<utils::disk_space_monitor> disk_space_monitor_shard0;
+    std::optional<replica::write_throttling_controller> write_throttling_controller_shard0;
     sharded<compaction_manager> cm;
     sharded<sstables::storage_manager> sstm;
     distributed<replica::database> db;
@@ -813,7 +815,8 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
         return seastar::async([&app, cfg, ext, &disk_space_monitor_shard0, &cm, &sstm, &db, &qp, &bm, &proxy, &mapreduce_service, &mm, &mm_notifier, &ctx, &opts, &dirs,
                 &prometheus_server, &cf_cache_hitrate_calculator, &load_meter, &feature_service, &gossiper, &snitch,
                 &token_metadata, &erm_factory, &snapshot_ctl, &messaging, &sst_dir_semaphore, &raft_gr, &service_memory_limiter,
-                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager, &rpc_dict_training_worker] {
+                &repair, &sst_loader, &ss, &lifecycle_notifier, &stream_manager, &task_manager, &rpc_dict_training_worker,
+                &write_throttling_controller_shard0] {
           try {
               if (opts.contains("relabel-config-file") && !opts["relabel-config-file"].as<sstring>().empty()) {
                   // calling update_relabel_config_from_file can cause an exception that would stop startup
@@ -2144,6 +2147,17 @@ To start the scylla server proper, simply invoke as: scylla server (or just scyl
             );
             auto stop_dict_service = defer_verbose_shutdown("dictionary training", [&] {
                 dict_service.stop().get();
+            });
+
+            supervisor::notify("starting write throttling controller");
+            auto write_throttling_controller_cfg = replica::write_throttling_controller::config {
+                .db = db,
+                .disk_utilization_threshold = cfg->write_throttling_disk_utilization_threshold,
+            };
+            write_throttling_controller_shard0.emplace(std::move(write_throttling_controller_cfg), *disk_space_monitor_shard0,
+                                                       stop_signal.as_local_abort_source());
+            auto stop_streaming_controller = defer_verbose_shutdown("write throttling controller", [&] {
+                write_throttling_controller_shard0->stop().get();
             });
 
             supervisor::notify("starting tracing");
