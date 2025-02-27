@@ -9,7 +9,8 @@ target_sources(replica
     memtable.cc
     mutation_dump.cc
     table.cc
-    tablets.cc)
+    tablets.cc
+    write_throttling.cc)
 target_include_directories(replica
   PUBLIC
     ${CMAKE_SOURCE_DIR})
