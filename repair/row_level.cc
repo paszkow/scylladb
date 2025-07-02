@@ -3299,7 +3299,8 @@ repair_service::repair_service(sharded<service::topology_state_machine>& tsm,
         db::view::view_builder& vb,
         tasks::task_manager& tm,
         service::migration_manager& mm,
-        size_t max_repair_memory)
+        size_t max_repair_memory,
+        replica::out_of_space_controller* oos_controller)
     : _tsm(tsm)
     , _gossiper(gossiper)
     , _messaging(ms)
@@ -3313,6 +3314,12 @@ repair_service::repair_service(sharded<service::topology_state_machine>& tsm,
     , _node_ops_metrics(_repair_module)
     , _max_repair_memory(max_repair_memory)
     , _memory_sem(max_repair_memory)
+    , _out_of_space_subscription(oos_controller && (this_shard_id() == 0) ? oos_controller->subscribe([this] (auto critical_level_reached) {
+        if (bool(critical_level_reached)) {
+            return container().invoke_on_all([] (repair_service& rs) { return rs.drain(); });
+        }
+        return container().invoke_on_all([] (repair_service& rs) { rs.enable(); });
+    }) : replica::out_of_space_controller::subscription())
 {
     tm.register_module("repair", _repair_module);
     if (this_shard_id() == 0) {
@@ -3324,6 +3331,8 @@ repair_service::repair_service(sharded<service::topology_state_machine>& tsm,
 future<> repair_service::start() {
     _load_history_done = load_history();
     co_await init_ms_handlers();
+
+    _state = state::running;
 }
 
 future<> repair_service::stop() {
@@ -3338,15 +3347,40 @@ future<> repair_service::stop() {
         rlogger.debug("Unregistering gossiper helper");
         co_await _gossiper.local().unregister_(_gossip_helper);
     }
-    _stopped = true;
+    _state = state::stopped;
     rlogger.info("Stopped repair_service");
   } catch (...) {
     on_fatal_internal_error(rlogger, format("Failed stopping repair_service: {}", std::current_exception()));
   }
 }
 
+void repair_service::enable() {
+    SCYLLA_ASSERT(_state == state::none || _state == state::running);
+    rlogger.info("Asked to enable");
+
+    if (_state == state::none) {
+        _state = state::running;
+        SCYLLA_ASSERT(_disabled_state_count == 0);
+    } else if (_disabled_state_count > 0 && --_disabled_state_count > 0) {
+        rlogger.debug("Repair service is still disabled, requires {} more call(s) to enable()", _disabled_state_count);
+        return;
+    }
+
+    rlogger.info("Enabled");
+}
+
+future<> repair_service::drain() {
+    rlogger.info("Asked to drain");
+    ++_disabled_state_count;
+    // Abort ongoing repairs
+    co_await abort_all();
+    rlogger.info("Drained");
+}
+
 repair_service::~repair_service() {
-    SCYLLA_ASSERT(_stopped);
+    // Assert that repair service was explicitly stopped, if started.
+    // Otherwise, fiber(s) will be alive after the object is stopped.
+    SCYLLA_ASSERT(_state == state::none || _state == state::stopped);
 }
 
 static shard_id repair_id_to_shard(tasks::task_id& repair_id) {
