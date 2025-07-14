@@ -2168,6 +2168,9 @@ compaction_manager::maybe_split_sstable(sstables::shared_sstable sst, table_stat
     if (!split_compaction_task_executor::sstable_needs_split(sst, opt)) {
         co_return std::vector<sstables::shared_sstable>{sst};
     }
+    if (!can_proceed(&t)) {
+        co_return std::vector<sstables::shared_sstable>{sst};
+    }
     std::vector<sstables::shared_sstable> ret;
 
     auto gate = get_compaction_state(&t).gate.hold();
