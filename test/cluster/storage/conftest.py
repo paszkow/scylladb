@@ -59,7 +59,8 @@ def space_limited_directories(pytestconfig):
 @pytest.fixture(scope="function")
 async def manager(manager: ManagerClient, space_limited_directories: list[pathlib.Path]):
     cmdline = ["--disk-space-monitor-normal-polling-interval-in-seconds", "1",
-               "--critical-disk-utilization-level", "0.8"]
+               "--critical-disk-utilization-level", "0.8",
+               "--hinted-handoff-enabled", "0"]
     for id, path in enumerate(space_limited_directories, 1):
         await manager.server_add(cmdline=[*cmdline, '--workdir', str(path)], property_file={"dc": "dc1", "rack": f"r{id}"})
 

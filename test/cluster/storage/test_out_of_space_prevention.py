@@ -16,6 +16,7 @@ from cassandra.cluster import ConsistencyLevel, EXEC_PROFILE_DEFAULT
 from test.cluster.conftest import skip_mode
 from test.cluster.util import new_test_keyspace, new_test_table
 from test.pylib.manager_client import ManagerClient
+from test.pylib.tablets import get_tablet_count
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +59,7 @@ async def test_user_writes_rejection(manager: ManagerClient) -> None:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
             logger.info("Populate data to the table so DB hits critical disk utilization level")
             count = disk_info.free // 1024
-            for query in write_generator(cf, count):
-                cql.execute(query)
+            await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, count)])
 
             logger.info("Verify the last write did not reach the target node")
             profile = cql.execution_profile_clone_update(EXEC_PROFILE_DEFAULT, consistency_level = ConsistencyLevel.ONE)
@@ -110,8 +110,7 @@ async def test_autotoogle_compaction(manager: ManagerClient) -> None:
 
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
             for _ in range(3):
-                for query in write_generator(cf, 10):
-                    cql.execute(query)
+                await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, 10)])
                 await manager.api.flush_keyspace(servers[0].ip_addr, ks)
 
             logger.info("Create a big file on the target node to reach critical disk utilization level")
@@ -149,8 +148,7 @@ async def test_reject_split_compaction(manager: ManagerClient) -> None:
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 1}") as ks:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
             for _ in range(30):
-                for query in write_generator(cf, 100):
-                    cql.execute(query)
+                await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, 100)])
             await manager.api.flush_keyspace(servers[0].ip_addr, ks)
 
             logger.info("Trigger split compaction")
@@ -180,8 +178,7 @@ async def test_split_compaction_not_triggered(manager: ManagerClient) -> None:
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 1}") as ks:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
             for _ in range(30):
-                for query in write_generator(cf, 100):
-                    cql.execute(query)
+                await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, 100)])
             await manager.api.flush_keyspace(servers[0].ip_addr, ks)
 
             logger.info("Create a big file on the target node to reach critical disk utilization level")
@@ -200,18 +197,25 @@ async def test_split_compaction_not_triggered(manager: ManagerClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_autotoogle_repair(manager: ManagerClient) -> None:
+async def test_tablet_repair(manager: ManagerClient) -> None:
     servers = await manager.all_servers()
     cql, _ = await manager.get_ready_cql(servers)
 
     workdir = await manager.server_get_workdir(servers[0].server_id)
     log = await manager.server_open_log(servers[0].server_id)
+    host = await manager.get_host_id(servers[0].server_id)
     mark = await log.mark()
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3} AND tablets = {'initial': 4}") as ks:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
-            for query in write_generator(cf, 100):
-                cql.execute(query)
+            table = cf.split('.')[-1]
+
+            for _ in range(2):
+                await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, 100)])
+                await manager.api.flush_keyspace(servers[0].ip_addr, ks)
+            await manager.server_stop_gracefully(servers[0].server_id)
+            await manager.server_wipe_sstables(servers[0].server_id, *cf.split('.'))
+            await manager.server_start(servers[0].server_id)
 
             logger.info("Create a big file on the target node to reach critical disk utilization level")
             disk_info = psutil.disk_usage(workdir)
@@ -219,21 +223,31 @@ async def test_autotoogle_repair(manager: ManagerClient) -> None:
             for _ in range(2):
                 mark, _ = await log.wait_for("repair - Drained", from_mark=mark)
 
-            logger.info("Try to run repair and expect a failure")
-            response = await manager.api.tablet_repair(servers[0].ip_addr, *cf.split('.'), "all", await_completion=False)
+            logger.info("Schedule tablet repair")
+            response = await manager.api.tablet_repair(servers[0].ip_addr, ks, table, "all", await_completion=False)
             task_id = response['tablet_task_id']
-            mark, _ = await log.wait_for("Repair for tablet migration .* failed: std::runtime_error \(Repair service is disabled. No repairs will be started until it's re-enabled\)", from_mark=mark)
+
+            for _ in range(await get_tablet_count(manager, servers[1], ks, table)):
+                mark, matches = await log.wait_for("Initiating tablet repair host=(?P<host>.*) tablet=(?P<tablet>.*)", from_mark=mark)
+                dst_host, tablet = matches[0][1].group("host"), matches[0][1].group("tablet")
+                if host == dst_host:
+                    # Tablet repair is triggered on the node with disk utilization above the critical level.
+                    # A local tablet repair task is refused to be created and the tablet repair fails.
+                    error = "\(Repair service is disabled. No repairs will be started until it's re-enabled\)"
+                else:
+                    # Tablet repair is triggered on the node with disk utilization below the critical level.
+                    # A local tablet repair task is created and the row-level repair is executed. It will try
+                    # to send missing rows to the node with critical disk utilization that are rejected.
+                    error = f".*put_row_diff: Repair follower={host} failed in put_row_diff handler"
+
+                await log.wait_for(f"repair for tablet {tablet} failed: seastar::rpc::remote_verb_error {error}", from_mark=mark)
 
             logger.info("Restart the node")
             await manager.server_restart(servers[0].server_id)
             await log.wait_for("repair - Drained", from_mark=mark)
 
-            time.sleep(1) # Let the cluster run for a sec to grep for potential errors
-            assert await log.grep("repair - Enabled", from_mark=mark) == []
-
-            logger.info("Remove the file and wait for DB to drop below the critical disk utilization level")
+            logger.info("Remove the file and wait for the tablet repair to succeed")
             os.unlink(filename)
-            mark, _ = await log.wait_for("repair - Enabled", from_mark=mark)
             await manager.api.wait_task(servers[0].ip_addr, task_id)
 
 
@@ -247,9 +261,7 @@ async def test_autotoogle_reject_incoming_migrations(manager: ManagerClient) -> 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 1}") as ks:
         async with new_test_table(manager, ks, "pk int PRIMARY KEY, t text") as cf:
             table = cf.split('.')[-1]
-
-            for query in write_generator(cf, 10):
-                cql.execute(query)
+            await asyncio.gather(*[cql.run_async(query) for query in write_generator(cf, 10)])
 
             logger.info("Get tablet to migrate")
             table_id = await cql.run_async(f"SELECT id FROM system_schema.tables WHERE keyspace_name = '{ks}' AND table_name = '{table}'")
@@ -310,7 +322,6 @@ async def test_node_restart_while_tablet_split(manager: ManagerClient):
     await asyncio.gather(*[manager.server_update_config(server.server_id, config_options=cfg) for server in servers])
     await asyncio.gather(*[manager.server_restart(server.server_id) for server in servers])
 
-    # await asyncio.gather(*[manager.server_update_cmdline(server.server_id, cmdline_options=cmdline) for server in servers])
     cql, _ = await manager.get_ready_cql(servers)
     workdir = await manager.server_get_workdir(servers[0].server_id)
     log = await manager.server_open_log(servers[0].server_id)
