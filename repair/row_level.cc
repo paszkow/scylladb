@@ -767,6 +767,7 @@ private:
     bool _small_table_optimization_tm_calculated = false;
     service::frozen_topology_guard _frozen_topology_guard;
     service::topology_guard _topology_guard;
+    const bool _is_eligible_to_repair_rejection;
 public:
     std::vector<repair_node_state>& all_nodes() {
         return _all_node_states;
@@ -868,6 +869,7 @@ public:
             , _is_tablet(cf.uses_tablets())
             , _frozen_topology_guard(topo_guard)
             , _topology_guard(_frozen_topology_guard)
+            , _is_eligible_to_repair_rejection(cf.is_eligible_to_write_rejection_on_critical_disk_utilization())
             {
             if (master) {
                 add_to_repair_meta_for_masters(*this);
@@ -1966,6 +1968,10 @@ public:
 
     // RPC handler
     future<> put_row_diff_handler(repair_rows_on_wire rows) {
+        if (_rs.is_disabled() && _is_eligible_to_repair_rejection) {
+            co_await coroutine::return_exception(std::runtime_error("Repair service is disabled"));
+        }
+
         auto gate_held = _gate.hold();
         auto& cf = _db.local().find_column_family(_schema->id());
         cf.update_off_strategy_trigger();

@@ -127,8 +127,6 @@ class repair_service : public seastar::peering_sharded_service<repair_service> {
     state _state = state::none;
     uint32_t _disabled_state_count = 0;
 
-    bool is_disabled() const { return _state != state::running || _disabled_state_count > 0; }
-
     size_t _max_repair_memory;
     seastar::semaphore _memory_sem;
     seastar::named_semaphore _load_parallelism_semaphore = {16, named_semaphore_exception_factory{"Load repair history parallelism"}};
@@ -179,6 +177,8 @@ public:
     // The repair service is still alive after drain, i.e. accepts global repair requests
     // but it will not accept new local repairs unless it is moved back to enabled state.
     future<> drain();
+
+    bool is_disabled() const { return _state != state::running || _disabled_state_count > 0; }
 
     future<std::optional<gc_clock::time_point>> update_history(tasks::task_id repair_id, table_id table_id, dht::token_range range, gc_clock::time_point repair_time, bool is_tablet);
     future<> cleanup_history(tasks::task_id repair_id);
