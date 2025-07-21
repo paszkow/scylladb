@@ -17,8 +17,8 @@
 
 namespace replica {
 
-// Simple controller to notify database it is in the critical disk utilization zone. The action
-// is based on the current disk utilization.
+// Simple controller to notify subscribers that a critical disk utilization threshold has been reached
+// or dropped below.
 //
 // The controller uses the following configuration options:
 // - critical_disk_utilization_threshold - ratio of disk utilization at which the write throttling
@@ -31,7 +31,7 @@ public:
     };
 
     using reached_critical_disk_utilization = bool_class<struct reached_critical_disk_utilization_tag>;
-    using subscription_callback_type = noncopyable_function<future<void> (reached_critical_disk_utilization)>;
+    using subscription_callback_type = noncopyable_function<future<> (reached_critical_disk_utilization)>;
 
     class subscription : public bi::list_base_hook<bi::link_mode<bi::auto_unlink>> {
         friend class out_of_space_controller;

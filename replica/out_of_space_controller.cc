@@ -45,7 +45,6 @@ out_of_space_controller::out_of_space_controller(utils::disk_space_monitor& dsm,
         co_await notify();
     }))
     {
-        dsm.trigger_poll();
     }
 
 future<> out_of_space_controller::stop() {
