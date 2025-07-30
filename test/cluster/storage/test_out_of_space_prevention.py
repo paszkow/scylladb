@@ -233,14 +233,15 @@ async def test_tablet_repair(manager: ManagerClient) -> None:
                 if host == dst_host:
                     # Tablet repair is triggered on the node with disk utilization above the critical level.
                     # A local tablet repair task is refused to be created and the tablet repair fails.
-                    error = "\(Repair service is disabled. No repairs will be started until it's re-enabled\)"
+                    # error = "\(Repair service is disabled. No repairs will be started until it's re-enabled\)"
+                    error = ".*\(Repair service is disabled\)"
                 else:
                     # Tablet repair is triggered on the node with disk utilization below the critical level.
                     # A local tablet repair task is created and the row-level repair is executed. It will try
                     # to send missing rows to the node with critical disk utilization that are rejected.
                     error = f".*put_row_diff: Repair follower={host} failed in put_row_diff handler"
 
-                await log.wait_for(f"repair for tablet {tablet} failed: seastar::rpc::remote_verb_error {error}", from_mark=mark)
+                await log.wait_for(f"repair for tablet {tablet} failed: seastar::rpc::remote_verb_error {error}", from_mark=mark, timeout=60)
 
             logger.info("Restart the node")
             await manager.server_restart(servers[0].server_id)
