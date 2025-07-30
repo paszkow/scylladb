@@ -1434,6 +1434,9 @@ public:
         } else {
             return;
         }
+        if (_rs.is_disabled() && _is_eligible_to_repair_rejection) {
+            throw std::runtime_error("Repair service is disabled");
+        }
         if (small_table_optimization) {
             flush_rows(_schema, _working_row_buf, _repair_writer, small_table_optimization, this);
         } else {
@@ -3426,8 +3429,9 @@ future<> repair_service::drain() {
     rlogger.info("Asked to drain");
     ++_disabled_state_count;
     // Abort ongoing repairs
-    co_await abort_all();
+    // co_await abort_all();
     rlogger.info("Drained");
+    return make_ready_future<>();
 }
 
 repair_service::~repair_service() {
