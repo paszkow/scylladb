@@ -215,7 +215,11 @@ async def test_tablet_repair(manager: ManagerClient, volumes_factory: Callable) 
     cfg = {
         'tablet_load_stats_refresh_interval_in_seconds': 1,
         }
-    async with space_limited_servers(manager, volumes_factory, ["100M"]*3, cmdline=global_cmdline, config=cfg) as servers:
+    cmdline = [*global_cmdline,
+               "--logger-log-level", "repair=debug",
+               "--logger-log-level", "storage_service=debug",
+               ]
+    async with space_limited_servers(manager, volumes_factory, ["100M"]*3, cmdline=cmdline, config=cfg) as servers:
         cql, _ = await manager.get_ready_cql(servers)
 
         workdir = await manager.server_get_workdir(servers[0].server_id)
