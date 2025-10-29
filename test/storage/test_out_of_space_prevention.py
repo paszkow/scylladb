@@ -15,12 +15,24 @@ from cassandra.cluster import ConsistencyLevel, EXEC_PROFILE_DEFAULT
 from typing import Callable
 
 from test.cluster.conftest import skip_mode
-from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table
+from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table, trigger_stepdown
 from test.pylib.manager_client import ManagerClient
+from test.pylib.internal_types import ServerInfo, HostID
 from test.pylib.tablets import get_tablet_count
 from test.storage.conftest import space_limited_servers
 
 logger = logging.getLogger(__name__)
+
+
+async def force_candidate_election_for_topology_coordinator(candidate: HostID, servers: list[ServerInfo], manager):
+    hosts = [await manager.get_host_id(s.server_id) for s in servers]
+    while True:
+        coord = await get_topology_coordinator(manager)
+        if coord == candidate:
+            break
+
+        await trigger_stepdown(manager, servers[hosts.index(coord)])
+    assert await get_topology_coordinator(manager) == candidate
 
 
 def write_generator(table, size_in_kb: int):
@@ -211,11 +223,18 @@ async def test_split_compaction_not_triggered(manager: ManagerClient, volumes_fa
 
 
 @pytest.mark.asyncio
+@skip_mode('release', 'error injections are not supported in release mode')
 async def test_tablet_repair(manager: ManagerClient, volumes_factory: Callable) -> None:
     cfg = {
         'tablet_load_stats_refresh_interval_in_seconds': 1,
         }
-    async with space_limited_servers(manager, volumes_factory, ["100M"]*3, cmdline=global_cmdline, config=cfg) as servers:
+    cmdline = [*global_cmdline,
+               "--logger-log-level", "repair=debug",
+               "--logger-log-level", "storage_service=debug",
+               "--logger-log-level", "raft_topology=debug",
+               "--logger-log-level", "compaction_manager=debug",
+               ]
+    async with space_limited_servers(manager, volumes_factory, ["100M"]*3, cmdline=cmdline, config=cfg) as servers:
         cql, _ = await manager.get_ready_cql(servers)
 
         workdir = await manager.server_get_workdir(servers[0].server_id)
@@ -233,6 +252,8 @@ async def test_tablet_repair(manager: ManagerClient, volumes_factory: Callable) 
                 await manager.server_stop_gracefully(servers[0].server_id)
                 await manager.server_wipe_sstables(servers[0].server_id, ks, table)
                 await manager.server_start(servers[0].server_id)
+
+                await force_candidate_election_for_topology_coordinator(host, servers, manager)
 
                 logger.info("Create a big file on the target node to reach critical disk utilization level")
                 disk_info = psutil.disk_usage(workdir)
@@ -266,8 +287,10 @@ async def test_tablet_repair(manager: ManagerClient, volumes_factory: Callable) 
 
                     logger.info("Restart the node")
                     mark = await log.mark()
-                    await manager.server_restart(servers[0].server_id, wait_others=2)
-                    await manager.driver_connect()
+                    await manager.server_restart(servers[0].server_id)
+
+                    await force_candidate_election_for_topology_coordinator(host, servers, manager)
+
                     for _ in range(2):
                         mark, _ = await log.wait_for("repair - Drained", from_mark=mark)
 
