@@ -107,6 +107,14 @@ static logging::logger slogger("storage_proxy");
 static logging::logger qlogger("query_result");
 static logging::logger mlogger("mutation_data");
 
+bool storage_proxy_bug_injection::should_drop_read_repair_write(uint64_t& counter) {
+    auto every_n = utils::get_local_injector().inject_parameter<uint64_t>("gemini_bug_every_n");
+    if (every_n && *every_n > 0) {
+        return ++counter % *every_n == 0;
+    }
+    return false;
+}
+
 namespace {
 
 
@@ -4713,6 +4721,15 @@ void storage_proxy::send_to_live_endpoints(storage_proxy::response_id_type respo
     auto rmutate = [this, handler_ptr, timeout, response_id, &global_stats] (locator::host_id coordinator, const host_id_vector_replica_set& forward) {
         auto msize = handler_ptr->get_mutation_size(); // can overestimate for repair writes
         global_stats.queued_write_bytes += msize;
+
+        // BUG INJECTION: silently drop read-repair write and fake success.
+        // Enabled by error injection parameter: gemini_bug_every_n.
+        static thread_local uint64_t drop_read_repair_write_counter = 0;
+        if (handler_ptr->read_repair_write() && storage_proxy_bug_injection::should_drop_read_repair_write(drop_read_repair_write_counter)) {
+            slogger.debug("BUG INJECTION: Silently dropping read-repair write to {}", coordinator);
+            got_response(response_id, coordinator, std::nullopt);
+            return make_ready_future<>();
+        }
 
         return handler_ptr->apply_remotely(coordinator, forward, response_id, timeout, handler_ptr->get_trace_state())
                 .finally([this, p = shared_from_this(), h = std::move(handler_ptr), msize, &global_stats] {

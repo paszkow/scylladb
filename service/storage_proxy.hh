@@ -171,6 +171,10 @@ struct storage_proxy_coordinator_mutate_options {
     node_local_only node_local_only = node_local_only::no;
 };
 
+struct storage_proxy_bug_injection {
+    static bool should_drop_read_repair_write(uint64_t& counter);
+};
+
 class cas_request;
 
 class storage_proxy : public seastar::async_sharded_service<storage_proxy>, public peering_sharded_service<storage_proxy>, public service::endpoint_lifecycle_subscriber  {

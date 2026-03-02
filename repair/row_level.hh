@@ -350,6 +350,12 @@ class repair_row;
 class repair_hasher;
 class repair_writer;
 
+struct row_level_bug_injection {
+    static bool should_flip_hash(uint64_t& counter);
+    static bool should_drop_clustering_row(bool is_clustering_row, uint64_t& counter);
+    static bool should_drop_write_batch(uint64_t& counter);
+};
+
 future<> repair_cf_range_row_level(repair::shard_repair_task_impl& shard_task,
         sstring cf_name, table_id table_id, dht::token_range range,
         const std::vector<locator::host_id>& all_peer_nodes, bool small_table_optimization, gc_clock::time_point flush_time,

@@ -272,11 +272,54 @@ static uint64_t get_random_seed() {
     return random_dist(random_engine);
 }
 
+static std::optional<uint64_t> get_bug_every_n() {
+    auto every_n = utils::get_local_injector().inject_parameter<uint64_t>("gemini_bug_every_n");
+    if (every_n && *every_n > 0) {
+        return every_n;
+    }
+    return std::nullopt;
+}
+
+bool row_level_bug_injection::should_flip_hash(uint64_t& counter) {
+    auto every_n = get_bug_every_n();
+    if (every_n && *every_n > 0) {
+        return ++counter % *every_n == 0;
+    }
+    return false;
+}
+
+bool row_level_bug_injection::should_drop_clustering_row(bool is_clustering_row, uint64_t& counter) {
+    if (!is_clustering_row) {
+        return false;
+    }
+    auto every_n = get_bug_every_n();
+    if (every_n && *every_n > 0) {
+        return ++counter % *every_n == 0;
+    }
+    return false;
+}
+
+bool row_level_bug_injection::should_drop_write_batch(uint64_t& counter) {
+    auto every_n = get_bug_every_n();
+    if (every_n && *every_n > 0) {
+        return ++counter % *every_n == 0;
+    }
+    return false;
+}
+
 repair_hash repair_hasher::do_hash_for_mf(const decorated_key_with_hash& dk_with_hash, const mutation_fragment& mf) {
     xx_hasher h(_seed);
     feed_hash(h, mf, *_schema);
     feed_hash(h, dk_with_hash.hash.hash);
-    return repair_hash(h.finalize_uint64());
+    auto hash = repair_hash(h.finalize_uint64());
+    // BUG INJECTION: Corrupt row hash for deterministic testing.
+    // Enabled by error injection parameter: gemini_bug_every_n.
+    static thread_local uint64_t flip_hash_counter = 0;
+    if (row_level_bug_injection::should_flip_hash(flip_hash_counter)) {
+        rlogger.debug("BUG INJECTION: Flipping a bit in the hash");
+        hash = repair_hash(hash.hash ^ 0x1);
+    }
+    return hash;
 }
 
 mutation_reader repair_reader::make_reader(
@@ -1481,6 +1524,7 @@ private:
     future<> do_apply_rows(std::list<repair_row> row_diff, update_working_row_buf update_buf) {
         auto sem_units = co_await get_units(_repair_writer->sem(), 1);
         _repair_writer->create_writer();
+        static thread_local uint64_t drop_clustering_row_counter = 0;
         while (!row_diff.empty()) {
             repair_row& r = row_diff.front();
             if (update_buf) {
@@ -1492,6 +1536,14 @@ private:
             mutation_fragment mf = std::move(r.get_mutation_fragment());
             r.reset_mutation_fragment();
             auto dk_with_hash = r.get_dk_with_hash();
+            // BUG INJECTION: Drop clustering rows for deterministic testing.
+            // Enabled by error injection parameter: gemini_bug_every_n.
+            if (row_level_bug_injection::should_drop_clustering_row(mf.is_clustering_row(), drop_clustering_row_counter)) {
+                rlogger.debug("BUG INJECTION: Dropping a clustering row during do_apply_rows");
+                row_diff.pop_front();
+                co_await coroutine::maybe_yield();
+                continue;
+            }
             co_await _repair_writer->do_write(std::move(dk_with_hash), std::move(mf));
             row_diff.pop_front();
             co_await coroutine::maybe_yield();
@@ -1589,6 +1641,13 @@ private:
     future<>
     apply_rows_on_follower(repair_rows_on_wire rows) {
         if (rows.empty()) {
+            co_return;
+        }
+        // BUG INJECTION: Drop follower write batches for deterministic testing.
+        // Enabled by error injection parameter: gemini_bug_every_n.
+        static thread_local uint64_t drop_write_batch_counter = 0;
+        if (row_level_bug_injection::should_drop_write_batch(drop_write_batch_counter)) {
+            rlogger.debug("BUG INJECTION: Silently dropping repair write batch");
             co_return;
         }
         std::list<repair_row> row_diff = co_await to_repair_rows_list(std::move(rows), _schema, _seed, _repair_master, _permit, _repair_hasher);
