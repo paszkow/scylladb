@@ -58,6 +58,11 @@ BOOST_AUTO_TEST_CASE(TestXmlErrorPayload) {
     BOOST_REQUIRE_EQUAL(message, error.get_error_message());
     BOOST_REQUIRE_EQUAL(error.is_retryable(), utils::http::retryable::yes);
 
+    error = aws::aws_error::parse(build_xml_response("TooManyRequests", message, requestId)).value();
+    BOOST_REQUIRE_EQUAL(aws::aws_error_type::THROTTLING, error.get_error_type());
+    BOOST_REQUIRE_EQUAL(message, error.get_error_message());
+    BOOST_REQUIRE_EQUAL(error.is_retryable(), utils::http::retryable::yes);
+
     error = aws::aws_error::parse(build_xml_response("IDontExist", message, requestId, message_style::plural)).value();
     BOOST_REQUIRE_EQUAL(aws::aws_error_type::UNKNOWN, error.get_error_type());
     BOOST_REQUIRE_EQUAL(message, error.get_error_message());
