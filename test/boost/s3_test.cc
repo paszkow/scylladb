@@ -8,6 +8,7 @@
 
 
 #include <unordered_set>
+#include <ranges>
 #include <regex>
 #include <boost/test/unit_test.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -17,8 +18,10 @@
 #include <seastar/core/file.hh>
 #include <seastar/core/fstream.hh>
 #include <seastar/core/sleep.hh>
+#include <seastar/core/with_scheduling_group.hh>
 #include <seastar/http/exception.hh>
 #include <seastar/util/closeable.hh>
+#include <seastar/util/defer.hh>
 #include <seastar/util/short_streams.hh>
 #include <seastar/core/units.hh>
 #include <seastar/core/metrics_api.hh>
@@ -1250,4 +1253,91 @@ SEASTAR_THREAD_TEST_CASE(test_throttling_controller_metrics_change_on_upload_pro
     BOOST_REQUIRE_MESSAGE(refused.has_value(), "s3_refused_request_ratio{operation=request} metric not registered");
     BOOST_REQUIRE_GE(*refused, 0.0);
     BOOST_REQUIRE_LE(*refused, 1.0);
+}
+
+// Reads the s3_nr_connections gauge of the client's group for the given
+// scheduling group, or 0 if that group has no client yet.
+static unsigned read_s3_connections(const sstring& class_name) {
+    const auto& value_map = seastar::metrics::impl::get_value_map();
+    auto fam_it = value_map.find("s3_nr_connections");
+    if (fam_it == value_map.end()) {
+        return 0;
+    }
+    for (const auto& [holder, reg] : fam_it->second) {
+        if (!reg || !reg->is_enabled()) {
+            continue;
+        }
+        const auto& labels = reg->get_id().labels();
+        auto cls = labels.find("class");
+        if (cls != labels.end() && cls->second.value() == class_name) {
+            return unsigned((*reg)().d());
+        }
+    }
+    return 0;
+}
+
+// The client splits connections_per_shard between the scheduling groups that
+// have used it, in proportion to their shares. A group that issues a single
+// request and then goes idle keeps its slice forever, so a busy group loses
+// connections it could otherwise use. In production a one-off operation in the
+// gossip group cut the statement group's pool from 79 to 50 connections for
+// good, and that shard throttled the whole cluster's reads.
+SEASTAR_THREAD_TEST_CASE(test_idle_group_does_not_shrink_busy_group_connections_s3) {
+    constexpr unsigned connections_per_shard = 16;
+    constexpr unsigned concurrency = 4 * connections_per_shard;
+
+    auto busy_sg = create_scheduling_group("s3_busy", 1000).get();
+    auto idle_sg = create_scheduling_group("s3_idle", 1000).get();
+    auto destroy_groups = defer([&] () noexcept {
+        destroy_scheduling_group(busy_sg).get();
+        destroy_scheduling_group(idle_sg).get();
+    });
+
+    s3_test_fixture guard([] {
+        s3::endpoint_config cfg = {
+            .port = std::stoul(tests::getenv_safe("S3_SERVER_PORT_FOR_TEST")),
+            .use_https = ::getenv("AWS_DEFAULT_REGION") != nullptr,
+            .region = ::getenv("AWS_DEFAULT_REGION") ? : "local",
+            .connections_per_shard = connections_per_shard,
+        };
+        return s3::client::make(tests::getenv_safe("S3_SERVER_ADDRESS_FOR_TEST"), make_lw_shared<s3::endpoint_config>(std::move(cfg)), make_test_retry_strategy());
+    });
+    auto cln = guard.client();
+    const auto name = guard.object_path("testobject");
+    cln->put_object(name, sstring("1234567890").release()).get();
+
+    // Issue many concurrent GETs from the busy group and return the largest
+    // number of connections its pool opened while they were in flight.
+    auto peak_connections = [&] {
+        unsigned peak = 0;
+        bool done = false;
+        auto sampler = seastar::async([&] {
+            while (!done) {
+                peak = std::max(peak, read_s3_connections("s3_busy"));
+                seastar::thread::yield();
+            }
+        });
+        with_scheduling_group(busy_sg, [&] {
+            return parallel_for_each(std::views::iota(0u, concurrency), [&] (unsigned) {
+                return cln->get_object_contiguous(name).discard_result();
+            });
+        }).get();
+        done = true;
+        sampler.get();
+        return peak;
+    };
+
+    const unsigned before = peak_connections();
+    testlog.info("busy group peak connections before the idle group's request: {}", before);
+
+    // One request from another group, which never uses the client again.
+    with_scheduling_group(idle_sg, [&] {
+        return cln->get_object_size(name).discard_result();
+    }).get();
+
+    const unsigned after = peak_connections();
+    testlog.info("busy group peak connections after the idle group's request: {}", after);
+
+    BOOST_REQUIRE_GT(before, 0u);
+    BOOST_REQUIRE_EQUAL(after, before);
 }
