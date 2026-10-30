@@ -1757,11 +1757,10 @@ class client::chunked_download_source final : public seastar::data_source_impl {
     static constexpr size_t _socket_buff_size = 128_KiB;
     static constexpr size_t _max_buffers_size = 5_MiB;
     static constexpr double _buffers_low_watermark = 0.5;
-    static constexpr double _buffers_high_watermark = 0.9;
     std::deque<temporary_buffer<char>> _buffers;
     size_t _buffers_size = 0;
     bool _is_finished = false;
-    bool _is_contiguous_mode = false;
+    bool _size_known;
     condition_variable _bg_fiber_cv;
     condition_variable _get_cv;
     future<> _filling_fiber = make_ready_future<>();
@@ -1802,74 +1801,62 @@ class client::chunked_download_source final : public seastar::data_source_impl {
                     co_return;
                 }
 
-                // The object size is not known yet, so ask for the whole object and
-                // learn the size from Content-Length. Requesting a byte range instead
-                // would fail on an empty object: no byte range is satisfiable when the
-                // object is zero-length (RFC 7233), so the server answers 416. Only the
-                // first request per object is range-less, the rest are chunked below.
-                const bool discover_size = _range == s3::full_range;
-                range current_range{0};
-                if (!discover_size) {
-                    if (_is_contiguous_mode) {
-                        current_range = _range;
-                        s3l.trace("Setting contiguous download mode for '{}', range: {}", _object_name, current_range);
-                    } else {
-                        // In non-contiguous mode we download the object in chunks of _max_buffers_size
-                        current_range = {_range.offset(), std::min(_range.length(), _max_buffers_size - _buffers_size)};
-                        s3l.trace("Setting ranged download mode for '{}', range: {}", _object_name, current_range);
-                    }
-                    if (current_range.length() == 0) {
-                        s3l.trace("Fiber for object '{}' completed downloading, signals EOS and leaving fiber", _object_name);
-                        _buffers.emplace_back(temporary_buffer<char>());
-                        _get_cv.signal();
-                        _is_finished = true;
-                        co_return;
-                    }
+                // Every request is bounded by the room left in the buffer window, so
+                // its body is read to the end and the http client returns the
+                // connection to its pool. A request for more than fits is abandoned
+                // once the window is full, and the client closes a connection whose
+                // body was left unread, so each such cycle paid for a new TLS
+                // handshake on this shard. Bounding the request needs the object
+                // size: when the caller did not pass one, ask once with HEAD. That
+                // also sidesteps the 416 a byte range draws on an empty object
+                // (RFC 7233), which is why the first request used to be range-less.
+                if (!_size_known) {
+                    _range = range{0, co_await _client->get_object_size(_object_name, _as)};
+                    _size_known = true;
+                }
+                // Without a download permit the fiber still makes progress, but one
+                // socket buffer at a time, so what the permits bound in memory stays
+                // bounded: the window is for fibers that hold one.
+                const size_t room = units ? _max_buffers_size - _buffers_size : _socket_buff_size;
+                range current_range{_range.offset(), std::min(_range.length(), room)};
+                if (current_range.length() == 0) {
+                    s3l.trace("Fiber for object '{}' completed downloading, signals EOS and leaving fiber", _object_name);
+                    _buffers.emplace_back(temporary_buffer<char>());
+                    _get_cv.signal();
+                    _is_finished = true;
+                    co_return;
                 }
 
                 auto req = http::request::make("GET", _client->_host, _object_name);
-                if (!discover_size) {
-                    req._headers["Range"] = current_range.to_header_string();
-                }
-
-                if (discover_size) {
-                    s3l.trace("Fiber for object '{}' will request the whole object", _object_name);
-                } else {
-                    s3l.trace("Fiber for object '{}' will make HTTP request within range {}", _object_name, current_range);
-                }
+                req._headers["Range"] = current_range.to_header_string();
+                s3l.trace("Fiber for object '{}' will make HTTP request within range {}", _object_name, current_range);
                 co_await _client->make_request(
                     std::move(req),
-                    [this, &units, discover_size, pf_length = discover_size ? 0 : current_range.length(), asked = current_range](
+                    [this, pf_length = current_range.length(), asked = current_range](
                         group_client& gc, const http::reply& reply, input_stream<char>&& in_) mutable -> future<> {
-                        if (!discover_size) {
-                            verify_reply_range(_object_name, asked, reply);
+                        verify_reply_range(_object_name, asked, reply);
+                        // The caller's size is trusted for bounding requests, but the
+                        // object's real size arrives with every 206; a caller that
+                        // overshot would otherwise end with a 416 instead of EOS.
+                        if (auto answered = utils::http::parse_content_range(reply.get_header("Content-Range"));
+                                answered && answered->total < _range.offset() + _range.length()) {
+                            _range = range{_range.offset(), answered->total - _range.offset()};
                         }
                         gc.prefetch_bytes += pf_length;
-                        if (discover_size) {
-                            // A zero length here needs no special case: the read loop
-                            // below sees an empty buffer with nothing left to fetch and
-                            // signals EOS on its own.
-                            _range = range{0, reply.content_length};
-                            s3l.trace("No range for object '{}' was provided. Setting the range to {} from Content-Length", _object_name, _range);
-                        }
                         auto in = std::move(in_);
-                        while (_buffers_size < _max_buffers_size && !_is_finished) {
+                        // The request fits the window, so the body is read to its end
+                        // whether or not a download permit is held; stopping early
+                        // would leave it unread and cost the connection. Only the
+                        // reader going away cuts a request short.
+                        while (!_is_finished) {
                             utils::get_local_injector().inject("kill_s3_inflight_req", [] {
                                 // Inject non-retryable error to emulate source failure
                                 throw aws::aws_exception(aws::aws_error(aws::aws_error_type::RESOURCE_NOT_FOUND, "Injected ResourceNotFound", utils::http::retryable::no));
                             });
 
                             s3l.trace("Fiber for object '{}' will try to read within range {}", _object_name, _range);
-                            temporary_buffer<char> buf;
-                            if (!units) {
-                                units = try_get_units(_client->_buffered_dl_sem, 1);
-                            }
-                            if (_buffers.empty() || units) {
-                                buf = co_await in.read();
-                                assert(buf.size() <= _socket_buff_size);
-                            } else {
-                                break;
-                            }
+                            auto buf = co_await in.read();
+                            assert(buf.size() <= _socket_buff_size);
                             auto buff_size = buf.size();
                             gc.read_bytes += buff_size;
                             _range += buff_size;
@@ -1900,7 +1887,6 @@ class client::chunked_download_source final : public seastar::data_source_impl {
                     [](std::exception_ptr ex) { std::rethrow_exception(std::move(ex)); },
                     whole_or_ranged_object,
                     _as);
-                _is_contiguous_mode = _buffers_size < _max_buffers_size * _buffers_high_watermark;
             } catch (...) {
                 failure = std::current_exception();
             }
@@ -1925,7 +1911,7 @@ class client::chunked_download_source final : public seastar::data_source_impl {
 
 public:
     chunked_download_source(shared_ptr<client> cln, sstring object_name, range range, seastar::abort_source* as)
-        : _client(std::move(cln)), _object_name(std::move(object_name)), _as(as), _range(range) {
+        : _client(std::move(cln)), _object_name(std::move(object_name)), _as(as), _range(range), _size_known(range != s3::full_range) {
         s3l.trace("Constructing chunked_download_source for object '{}'", _object_name);
         _filling_fiber = make_filling_fiber();
     }
