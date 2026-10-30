@@ -1004,7 +1004,9 @@ object_storage_base::make_data_or_index_source(sstable& sst, component_type type
 
 future<data_source>
 object_storage_base::make_source(sstable& sst, component_type type, file f, uint64_t offset, uint64_t len, file_input_stream_options) const {
-    co_return co_await maybe_wrap_source(sst, type, _client->make_download_source(make_object_name(sst, type), abort_source()), offset, len);
+    // The source downloads from the start of the object; the ranged wrapper
+    // below skips to offset, so the download has to cover offset + len.
+    co_return co_await maybe_wrap_source(sst, type, _client->make_download_source(make_object_name(sst, type), offset + len, abort_source()), offset, len);
 }
 
 future<data_source>

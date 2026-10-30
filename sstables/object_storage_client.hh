@@ -92,7 +92,13 @@ public:
     virtual file make_readable_file(object_name, abort_source* = nullptr) = 0;
     virtual data_sink make_data_upload_sink(object_name, object_storage_attributes, std::optional<unsigned> max_parts_per_piece, abort_source* = nullptr) = 0;
     virtual data_sink make_upload_sink(object_name, object_storage_attributes, abort_source* = nullptr) = 0;
-    virtual data_source make_download_source(object_name, abort_source* = nullptr) = 0;
+    // The object's size when the caller knows it, so the source can bound every
+    // request it makes without asking the store first; a backend that does not
+    // need it ignores it.
+    virtual data_source make_download_source(object_name, std::optional<uint64_t> size, abort_source* = nullptr) = 0;
+    data_source make_download_source(object_name name, abort_source* as = nullptr) {
+        return make_download_source(std::move(name), std::nullopt, as);
+    }
     virtual future<bool> object_exists(object_name name, abort_source* as = nullptr) = 0;
     virtual future<object_storage_attributes> get_object_metadata(object_name name, abort_source* as = nullptr) = 0;
 
